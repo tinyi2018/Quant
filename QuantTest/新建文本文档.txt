@@ -1,0 +1,181 @@
+#encoding:gbk
+'''
+本策略事先设定好交易的股票篮子，然后根据指数的CCI指标来判断超买和超卖
+当有超买和超卖发生时，交易事先设定好的股票篮子
+'''
+import os
+import sys
+import pandas as pd
+import numpy as np
+import talib
+import pymongo
+import tushare as ts
+import json 
+import importlib
+import datetime
+
+sys.path.append(r"D:\Jupyter_Pj\pyModule")
+import mongodbOp
+importlib.reload(mongodbOp)
+
+
+
+db_name = "stock"
+col_name = "stock_daily"
+stock_basic_col_name = "stock_basic_info"
+stock_divid_factors_col_name = "stock_divid_factors"
+stock_1mK_col_name = "stock_1mK_line"
+
+
+daily_start_date = "20120801"
+daily_end_date   = "20220811"
+
+
+def get_daily_from_db():
+
+
+	db_op = mongodbOp.MongoDbOp()
+	db_op.connect_To_MongoDb(db_name= db_name)
+	val_ret = db_op.find_any(stock_basic_info,{})
+	
+	return val_ret
+
+
+def ts_get_stock_basic():
+	ts.set_token('af5f423bb57f376e71c2903058362f8e3e053fe30f486463f9bdac8e')
+	pro = ts.pro_api()
+	df = pro.stock_basic()
+	
+	return df
+	
+def save_divid_factors_to_mongodb(ContextInfo):
+
+	db_op = mongodbOp.MongoDbOp()
+	db_op.connect_To_MongoDb(db_name= db_name)
+	
+	dict_list =[]
+	now = datetime.datetime.now()
+	now_data = now.strftime("%Y%m%d")
+	
+	df = ts_get_stock_basic()
+	stock_list = list(df["ts_code"])
+	
+	for stock_code in stock_list:
+		divid_factors = ContextInfo.get_divid_factors(stock_code)
+		dict = {"_id":stock_code,'updateTime': now_data,"value":str(divid_factors)}
+		dict_list.append(dict)
+		
+	#print (dict_list)
+	db_op.update_stock_divid_factors_many(stock_divid_factors_col_name,dict_list )
+	print ("save_divid_factors_to_mongodb   completed!!")
+	
+def save_stock_daily_to_db(ContextInfo):
+	db_op = mongodbOp.MongoDbOp()
+	db_op.connect_To_MongoDb(db_name= db_name)
+	stockbasic = db_op.find_any(stock_basic_col_name,{})
+	for i in stockbasic.index:
+		start_time_ = daily_start_date
+		if(stockbasic.loc[i,"list_date"] > start_time_):
+			start_time_ = stockbasic.loc[i,"list_date"]
+		df = ContextInfo.get_market_data(['open','high','low','close','volume','amount'], 
+											stock_code = [stockbasic.loc[i,"stock_code"]], 
+											start_time = start_time_, 
+											end_time = daily_end_date,
+											skip_paused = True, 
+											period = '1d', 
+											dividend_type = 'none', 
+											)
+		#db_op.insert_stock_daily_many(col_name, df)
+		print (df)
+		print ("db_op: insert_stock_daily_many completed!! i = %d", i)
+		
+		if( i >=1):
+			break
+	
+	
+	
+def save_stock_1mK_line_to_db(ContextInfo,stock_list,start_time_ ='20210801',end_time_ = '20220816'  ):
+	db_op = mongodbOp.MongoDbOp()
+	db_op.connect_To_MongoDb(db_name= db_name)
+	
+	df_temp = pd.DataFrame(data = None, columns = {'stock_code','trade_time','open','high','low','close','volume','amount'})
+	
+	for i in stock_list:
+		df = ContextInfo.get_market_data(['open','high','low','close','volume','amount'], [i],start_time =start_time_, 
+		end_time = end_time_,   period = '1m')
+	
+		df.reset_index(inplace = True)
+		df.rename(columns={'index':'trade_time'},inplace = True)
+		df.reset_index(inplace = True)
+		df.rename(columns={'index':'stock_code'},inplace = True)
+		df['stock_code'] = i
+		print ("db_op: after Insert 2 columes,  stock_code:= %s, len = %d , size = %d " %(i,len(df), sys.getsizeof(df)))
+		
+		df_temp = pd.concat([df_temp, df], axis=0, ignore_index=True)
+	
+		if( len(df_temp)>= 10000):
+			db_op.insert_stock_1mK_line_many(stock_1mK_col_name, df_temp)
+			#print (df_temp)
+			print ("db_op: insert_stock_1mK_line_many completed!!  stock_code:= %s, len = %d , size = %d " %(i,len(df_temp), sys.getsizeof(df_temp)))
+			df_temp.drop(df_temp.index, inplace=True)
+			
+			
+	if( len(df_temp)>= 1):
+		db_op.insert_stock_1mK_line_many(stock_1mK_col_name, df_temp)
+		#print (df_temp)
+		print ("db_op: insert_stock_1mK_line_many completed!! Out side !!!!   stock_code:= %s, len = %d , size = %d " %(i,len(df_temp), sys.getsizeof(df_temp)))
+		df_temp.drop(df_temp.index, inplace=True)
+		
+		
+	
+def init(ContextInfo):
+	#hs300成分股中sh和sz市场各自流通市值最大的前3只股票
+	ContextInfo.trade_code_list=['601398.SH','601857.SH','601288.SH','000333.SZ','002415.SZ','000002.SZ']
+	ContextInfo.set_universe(ContextInfo.trade_code_list)
+	ContextInfo.accID = '6000000058'
+	ContextInfo.buy = True
+	ContextInfo.sell = False
+	
+	stock_list = ['002920.SZ']
+	
+	save_stock_1mK_line_to_db(ContextInfo,stock_list)
+	#code_list = ContextInfo.get_sector('000001.SH')
+	#print (code_list)
+	
+	#code_list = ContextInfo.get_sector('399001.SZ')
+	#print (code_list)
+	
+	#code_list = ContextInfo.get_stock_list_in_sector("上证指数")
+	#print (code_list)
+	#print (len(code_list))
+	#code_list = ContextInfo.get_stock_list_in_sector("深证成指")
+	#print (code_list)
+	#print (len(code_list))
+	#save_divid_factors_to_mongodb(ContextInfo)
+	#np.save('divid_factors.npy',divid_factors)
+	#df = ContextInfo.get_market_data(['open','high','low','close','volume','amount'], stock_code = ['600629.SH',], 
+	#				skip_paused = True, period = '1d', dividend_type = 'none', count = 5)
+
+	#save_stock_daily_to_db(ContextInfo)
+	#for i in df.index:
+	#	df.loc[i,'stock_code'] = '600629.SH'
+		
+	#df.to_csv("600629.SH.csv")
+		
+	#print (df)
+	#key_val = list(divid_factors.keys())
+	#print (key_val)
+	#for i in key_val:
+	#	print (timetag_to_datetime(i, '%Y%m%d'))
+	
+	
+	#dff = ts_get_stock_basic()
+	#print (dff.head())
+	#val_ret = get_daily_from_db()
+	#print (val_ret)
+	
+def handlebar(ContextInfo):
+	#计算当前主图的cci
+	pass
+
+
